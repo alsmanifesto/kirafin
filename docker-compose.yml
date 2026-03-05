@@ -1,0 +1,80 @@
+version: "3.9"
+
+networks:
+  payments-net:
+    driver: bridge
+
+volumes:
+  prometheus-data:
+  grafana-data:
+
+services:
+  # ── Mock Blockchain Validator ────────────────────────────────────────────────
+  mock-blockchain:
+    build:
+      context: ./mock-blockchain
+    container_name: mock-blockchain
+    networks: [payments-net]
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # ── Payments API ─────────────────────────────────────────────────────────────
+  payments-api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: payments-api
+    networks: [payments-net]
+    ports:
+      - "8000:8000"
+    environment:
+      BLOCKCHAIN_SERVICE_URL: http://mock-blockchain:8001
+      APP_ENV: local
+    depends_on:
+      mock-blockchain:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Prometheus ───────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: prometheus
+    networks: [payments-net]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+    restart: unless-stopped
+
+  # ── Grafana ──────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: grafana
+    networks: [payments-net]
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    depends_on: [prometheus]
+    restart: unless-stopped
