@@ -1,3 +1,8 @@
+variable "ecr_url" {
+  description = "ECR repository URL (created by pipeline before terraform apply)"
+  type        = string
+}
+
 variable "aws_region" {
   description = "AWS region to deploy into"
   type        = string
