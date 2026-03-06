@@ -260,7 +260,6 @@ resource "aws_ecs_task_definition" "api" {
 
       environment = [
         { name = "APP_ENV", value = var.environment },
-        # Sidecar runs in same task → reachable via localhost
         { name = "BLOCKCHAIN_SERVICE_URL", value = "http://localhost:8001" }
       ]
 
@@ -279,37 +278,6 @@ resource "aws_ecs_task_definition" "api" {
         timeout     = 5
         retries     = 3
         startPeriod = 15
-      }
-
-      dependsOn = [{
-        containerName = "mock-blockchain"
-        condition     = "HEALTHY"
-      }]
-
-      user = "1000"
-    },
-    {
-      name      = "mock-blockchain"
-      image     = "${var.ecr_url}-blockchain:${var.image_tag}"
-      essential = false
-
-      portMappings = [{ containerPort = 8001, protocol = "tcp" }]
-
-      logConfiguration = {
-        logDriver = "awslogs"
-        options = {
-          "awslogs-group"         = aws_cloudwatch_log_group.api.name
-          "awslogs-region"        = var.aws_region
-          "awslogs-stream-prefix" = "blockchain"
-        }
-      }
-
-      healthCheck = {
-        command     = ["CMD-SHELL", "curl -f http://localhost:8001/health || exit 1"]
-        interval    = 15
-        timeout     = 5
-        retries     = 3
-        startPeriod = 10
       }
 
       user = "1000"

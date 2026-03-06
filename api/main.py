@@ -3,11 +3,11 @@ import httpx
 import logging
 import json
 import os
+import threading
+import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, field_validator
 from prometheus_client import Counter, Histogram, make_asgi_app
-from starlette.middleware.base import BaseHTTPMiddleware
-from api.vendors import get_vendor
 
 # ─── Structured logging ───────────────────────────────────────────────────────
 class JSONFormatter(logging.Formatter):
@@ -45,16 +45,37 @@ TXHASH_CONFIRMATIONS = Counter(
     ["result"],
 )
 
+# ─── Embedded Mock Blockchain (runs in same process on port 8001) ─────────────
+blockchain_app = FastAPI(title="Mock Blockchain Service")
+
+@blockchain_app.get("/health")
+def blockchain_health():
+    return {"status": "ok"}
+
+@blockchain_app.get("/confirm/{txhash}")
+def confirm(txhash: str):
+    if txhash.startswith("0x") and len(txhash) >= 10 and not txhash.endswith("bad"):
+        return {"txhash": txhash, "result": "confirmed", "block": 19_500_000}
+    return {"txhash": txhash, "result": "not found", "block": None}
+
+def start_blockchain_server():
+    uvicorn.run(blockchain_app, host="0.0.0.0", port=8001, log_level="warning")
+
+# Start blockchain in background thread on container startup
+blockchain_thread = threading.Thread(target=start_blockchain_server, daemon=True)
+blockchain_thread.start()
+
 # ─── App ──────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Cross-Border Payments API", version="1.0.0")
 
-# Mount Prometheus metrics endpoint
 metrics_app = make_asgi_app()
 app.mount("/metrics", metrics_app)
 
 BLOCKCHAIN_SERVICE_URL = os.getenv(
-    "BLOCKCHAIN_SERVICE_URL", "http://mock-blockchain:8001"
+    "BLOCKCHAIN_SERVICE_URL", "http://localhost:8001"
 )
+
+from api.vendors import get_vendor
 
 
 class TransferRequest(BaseModel):
