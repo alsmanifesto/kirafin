@@ -8,7 +8,7 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  ECR_REPOSITORY: payments-api
+  ECR_REPOSITORY: kirafin
   IMAGE_TAG: ${{ github.sha }}
 
 jobs:
