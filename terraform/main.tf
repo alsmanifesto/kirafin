@@ -117,6 +117,74 @@ resource "aws_security_group" "ecs" {
   tags = merge(local.common_tags, { Name = "${var.project}-ecs-sg" })
 }
 
+# ─── Security Group for VPC Endpoints ─────────────────────────────────────────
+resource "aws_security_group" "vpc_endpoints" {
+  name        = "${var.project}-vpce-sg"
+  description = "Allow HTTPS from ECS tasks to VPC endpoints"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    security_groups = [aws_security_group.ecs.id]
+    description     = "HTTPS from ECS tasks"
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = merge(local.common_tags, { Name = "${var.project}-vpce-sg" })
+}
+
+# ─── VPC Endpoints (SOC 2: traffic stays within AWS network) ──────────────────
+
+# ECR API endpoint (authentication)
+resource "aws_vpc_endpoint" "ecr_api" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.ecr.api"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private[*].id
+  security_group_ids  = [aws_security_group.vpc_endpoints.id]
+  private_dns_enabled = true
+  tags                = merge(local.common_tags, { Name = "${var.project}-ecr-api-endpoint" })
+}
+
+# ECR DKR endpoint (image layers)
+resource "aws_vpc_endpoint" "ecr_dkr" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.ecr.dkr"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private[*].id
+  security_group_ids  = [aws_security_group.vpc_endpoints.id]
+  private_dns_enabled = true
+  tags                = merge(local.common_tags, { Name = "${var.project}-ecr-dkr-endpoint" })
+}
+
+# S3 Gateway endpoint (ECR uses S3 for image layers — free)
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.${var.aws_region}.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = [aws_route_table.public.id]
+  tags              = merge(local.common_tags, { Name = "${var.project}-s3-endpoint" })
+}
+
+# CloudWatch Logs endpoint (structured logging from private tasks)
+resource "aws_vpc_endpoint" "cloudwatch_logs" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.logs"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private[*].id
+  security_group_ids  = [aws_security_group.vpc_endpoints.id]
+  private_dns_enabled = true
+  tags                = merge(local.common_tags, { Name = "${var.project}-logs-endpoint" })
+}
+
 # ─── ECS Cluster ──────────────────────────────────────────────────────────────
 resource "aws_ecs_cluster" "main" {
   name = "${var.project}-cluster"

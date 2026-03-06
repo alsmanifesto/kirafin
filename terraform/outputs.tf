@@ -1,6 +1,6 @@
 output "api_url" {
-  description = "HTTPS URL of the Payments API"
-  value       = "https://${aws_lb.main.dns_name}"
+  description = "URL of the Payments API"
+  value       = "http://${aws_lb.main.dns_name}"
 }
 
 output "ecs_cluster_name" {
