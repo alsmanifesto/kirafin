@@ -260,7 +260,7 @@ resource "aws_ecs_task_definition" "api" {
 
       environment = [
         { name = "APP_ENV", value = var.environment },
-        { name = "BLOCKCHAIN_SERVICE_URL", value = "http://localhost:8001" }
+        { name = "BLOCKCHAIN_SERVICE_URL", value = "http://127.0.0.1:8001" }
       ]
 
       logConfiguration = {
