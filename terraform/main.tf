@@ -6,14 +6,8 @@ terraform {
       version = "~> 5.0"
     }
   }
-  # In production: use S3 backend with DynamoDB locking
-  # backend "s3" {
-  #   bucket         = "payments-tfstate"
-  #   key            = "payments-api/terraform.tfstate"
-  #   region         = "us-east-1"
-  #   dynamodb_table = "payments-tfstate-lock"
-  #   encrypt        = true
-  # }
+  # Backend configurado dinámicamente desde el pipeline con -backend-config
+  backend "s3" {}
 }
 
 provider "aws" {
@@ -115,22 +109,6 @@ resource "aws_security_group" "ecs" {
   tags = merge(local.common_tags, { Name = "${var.project}-ecs-sg" })
 }
 
-# ─── ECR ──────────────────────────────────────────────────────────────────────
-resource "aws_ecr_repository" "api" {
-  name                 = var.project
-  image_tag_mutability = "IMMUTABLE"
-
-  image_scanning_configuration {
-    scan_on_push = true  # SOC 2: automated vulnerability scanning
-  }
-
-  encryption_configuration {
-    encryption_type = "AES256"
-  }
-
-  tags = local.common_tags
-}
-
 # ─── ECS Cluster ──────────────────────────────────────────────────────────────
 resource "aws_ecs_cluster" "main" {
   name = "${var.project}-cluster"
@@ -199,7 +177,7 @@ resource "aws_ecs_task_definition" "api" {
   container_definitions = jsonencode([
     {
       name      = "payments-api"
-      image     = "${aws_ecr_repository.api.repository_url}:${var.image_tag}"
+      image     = "${var.ecr_url}:${var.image_tag}"
       essential = true
 
       portMappings = [{ containerPort = 8000, protocol = "tcp" }]
