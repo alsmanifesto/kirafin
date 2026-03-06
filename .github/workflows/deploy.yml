@@ -8,72 +8,118 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  ECR_REPOSITORY: kirafin
   IMAGE_TAG: ${{ github.sha }}
+  ECR_REPO: payments-api
 
 jobs:
-  # ─── 1. Lint & Unit Tests ──────────────────────────────────────────────────
+  # ─── 1. Unit Tests ────────────────────────────────────────────────────────
   test:
     name: Unit Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
 
       - name: Install dependencies
-        run: |
-          pip install -r api/requirements.txt
-          pip install pytest pytest-asyncio httpx
+        run: pip install -r api/requirements.txt pytest pytest-asyncio httpx
 
       - name: Run unit tests
         env:
           PYTHONPATH: .
         run: pytest tests/ -v --tb=short
 
-      # DORA: track test results for change failure rate
-      - name: Record test result (DORA)
-        if: always()
-        run: |
-          echo "DORA_TEST_RESULT=${{ job.status }}" >> $GITHUB_ENV
-          echo "DORA_COMMIT=${{ github.sha }}" >> $GITHUB_ENV
-          echo "DORA_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_ENV
-
   # ─── 2. Security Scan ─────────────────────────────────────────────────────
   security:
-    name: Security Scan (SOC 2)
+    name: Security Scan
     runs-on: ubuntu-latest
     needs: test
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run Trivy vulnerability scanner
+      - name: Run Trivy
         uses: aquasecurity/trivy-action@master
         with:
-          scan-type: "fs"
-          scan-ref: "."
-          severity: "HIGH,CRITICAL"
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
           exit-code: "1"
           ignore-unfixed: true
 
-  # ─── 3. Build & Push Docker Image ─────────────────────────────────────────
-  build:
-    name: Build & Push
+  # ─── 3. Bootstrap: ECR + S3 bucket via AWS CLI (idempotent) ──────────────
+  bootstrap:
+    name: Bootstrap ECR + S3
     runs-on: ubuntu-latest
     needs: [test, security]
     if: github.ref == 'refs/heads/main'
     outputs:
-      image-uri: ${{ steps.push.outputs.image-uri }}
+      ecr_url: ${{ steps.ecr.outputs.url }}
+      tf_bucket: ${{ steps.s3.outputs.bucket }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create ECR repository (idempotent)
+        id: ecr
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+          # create-repository falla si ya existe, describe-repositories si no existe
+          aws ecr describe-repositories --repository-names $ECR_REPO 2>/dev/null || \
+            aws ecr create-repository \
+              --repository-name $ECR_REPO \
+              --image-tag-mutability IMMUTABLE \
+              --image-scanning-configuration scanOnPush=true
+
+          ECR_URL="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
+          echo "url=$ECR_URL" >> $GITHUB_OUTPUT
+          echo "ECR URL: $ECR_URL"
+
+      - name: Create S3 bucket for TF state (idempotent)
+        id: s3
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          BUCKET="payments-tfstate-${ACCOUNT_ID}"
+          echo "bucket=$BUCKET" >> $GITHUB_OUTPUT
+
+          aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null || \
+            aws s3api create-bucket \
+              --bucket "$BUCKET" \
+              --region $AWS_REGION \
+              --create-bucket-configuration LocationConstraint=$AWS_REGION
+
+          # Versioning + encryption + block public access (idempotente llamarlos siempre)
+          aws s3api put-bucket-versioning \
+            --bucket "$BUCKET" \
+            --versioning-configuration Status=Enabled
+
+          aws s3api put-bucket-encryption \
+            --bucket "$BUCKET" \
+            --server-side-encryption-configuration \
+              '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+
+          aws s3api put-public-access-block \
+            --bucket "$BUCKET" \
+            --public-access-block-configuration \
+              "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
+
+          echo "S3 bucket ready: $BUCKET"
+
+  # ─── 4. Build & Push Docker Image ────────────────────────────────────────
+  build:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    needs: bootstrap
+    if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
-
-      # DORA: record build start time for lead time calculation
-      - name: Record build start (DORA lead time)
-        run: echo "BUILD_START=$(date +%s)" >> $GITHUB_ENV
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -82,37 +128,29 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Login to Amazon ECR
-        id: login-ecr
+      - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build, tag, and push image
-        id: push
+      - name: Build & push
         env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_URL: ${{ needs.bootstrap.outputs.ecr_url }}
         run: |
-          docker build \
-            -f api/Dockerfile \
-            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
-            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
-            .
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-          echo "image-uri=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          docker build -f api/Dockerfile \
+            -t $ECR_URL:$IMAGE_TAG \
+            -t $ECR_URL:latest .
+          docker push $ECR_URL:$IMAGE_TAG
+          docker push $ECR_URL:latest
+          echo "Pushed $ECR_URL:$IMAGE_TAG"
 
-      - name: Record build end (DORA lead time)
-        run: |
-          BUILD_END=$(date +%s)
-          LEAD_TIME=$((BUILD_END - BUILD_START))
-          echo "DORA_LEAD_TIME_SECONDS=$LEAD_TIME" >> $GITHUB_ENV
-          echo "Lead time (commit→image): ${LEAD_TIME}s"
-
-  # ─── 4. Deploy via Terraform ──────────────────────────────────────────────
+  # ─── 5. Terraform: full infra deploy ─────────────────────────────────────
   deploy:
-    name: Deploy to ECS
+    name: Deploy Infrastructure + App
     runs-on: ubuntu-latest
-    needs: build
+    needs: [bootstrap, build]
+    if: github.ref == 'refs/heads/main'
     environment: production
+    outputs:
+      api_url: ${{ steps.api_url.outputs.url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -123,73 +161,69 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.9.0"
+          terraform_wrapper: false
 
       - name: Terraform Init
         working-directory: terraform
-        run: terraform init
-
-      - name: Terraform Plan
-        working-directory: terraform
-        env:
-          TF_VAR_image_tag: ${{ env.IMAGE_TAG }}
-        run: terraform plan -out=tfplan
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ needs.bootstrap.outputs.tf_bucket }}" \
+            -backend-config="key=payments-api/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="encrypt=true"
 
       - name: Terraform Apply
         working-directory: terraform
-        env:
-          TF_VAR_image_tag: ${{ env.IMAGE_TAG }}
-        run: terraform apply -auto-approve tfplan
+        run: |
+          terraform apply -auto-approve \
+            -var="image_tag=${{ env.IMAGE_TAG }}" \
+            -var="ecr_url=${{ needs.bootstrap.outputs.ecr_url }}"
 
-      # DORA: record deployment timestamp
-      - name: Record deployment (DORA)
+      - name: Get API URL
+        id: api_url
+        working-directory: terraform
+        run: |
+          URL=$(terraform output -raw api_url)
+          echo "url=$URL" >> $GITHUB_OUTPUT
+          echo "API URL: $URL"
+
+      - name: DORA – record deployment
         run: |
           echo "DEPLOYED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           echo "DEPLOYED_SHA=${{ github.sha }}"
           echo "DEPLOYED_BY=${{ github.actor }}"
 
-  # ─── 5. Post-Deploy Smoke Tests ───────────────────────────────────────────
+      - name: DORA – flag failure for MTTR
+        if: failure()
+        run: echo "DORA_FAILURE_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  # ─── 6. Smoke Tests ───────────────────────────────────────────────────────
   smoke-test:
-    name: Post-Deploy Smoke Tests
+    name: Smoke Tests
     runs-on: ubuntu-latest
     needs: deploy
     steps:
       - uses: actions/checkout@v4
 
-      - name: Get API URL from Terraform outputs
-        id: api-url
-        working-directory: terraform
+      - name: Wait for service healthy
+        env:
+          API_URL: ${{ needs.deploy.outputs.api_url }}
         run: |
-          terraform init -backend=false
-          echo "url=$(terraform output -raw api_url 2>/dev/null || echo ${{ secrets.API_URL }})" >> $GITHUB_OUTPUT
-
-      - name: Wait for service to be healthy
-        run: |
-          URL="${{ steps.api-url.outputs.url }}"
-          echo "Waiting for $URL/health..."
-          for i in {1..20}; do
-            if curl -sf "$URL/health" > /dev/null; then
-              echo "Service healthy"
+          for i in $(seq 1 24); do
+            if curl -sf "$API_URL/health" > /dev/null 2>&1; then
+              echo "Service is healthy"
               exit 0
             fi
-            echo "Attempt $i/20 – waiting 15s..."
+            echo "Attempt $i/24 – waiting 15s..."
             sleep 15
           done
-          echo "Service never became healthy!"
+          echo "Service never became healthy"
           exit 1
 
       - name: Run smoke tests
         env:
-          API_URL: ${{ steps.api-url.outputs.url }}
+          API_URL: ${{ needs.deploy.outputs.api_url }}
         run: bash tests/post-deploy-smoke-test.sh
-
-      # DORA: if smoke tests fail, flag for MTTR tracking
-      - name: Flag deployment failure for MTTR (DORA)
-        if: failure()
-        run: |
-          echo "DORA_FAILURE_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          echo "DORA_FAILURE_SHA=${{ github.sha }}"
-          # In production: post to PagerDuty / incident tracking system
