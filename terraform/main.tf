@@ -260,7 +260,8 @@ resource "aws_ecs_task_definition" "api" {
 
       environment = [
         { name = "APP_ENV", value = var.environment },
-        { name = "BLOCKCHAIN_SERVICE_URL", value = var.blockchain_service_url }
+        # Sidecar runs in same task → reachable via localhost
+        { name = "BLOCKCHAIN_SERVICE_URL", value = "http://localhost:8001" }
       ]
 
       logConfiguration = {
@@ -268,7 +269,7 @@ resource "aws_ecs_task_definition" "api" {
         options = {
           "awslogs-group"         = aws_cloudwatch_log_group.api.name
           "awslogs-region"        = var.aws_region
-          "awslogs-stream-prefix" = "ecs"
+          "awslogs-stream-prefix" = "api"
         }
       }
 
@@ -277,10 +278,40 @@ resource "aws_ecs_task_definition" "api" {
         interval    = 30
         timeout     = 5
         retries     = 3
+        startPeriod = 15
+      }
+
+      dependsOn = [{
+        containerName = "mock-blockchain"
+        condition     = "HEALTHY"
+      }]
+
+      user = "1000"
+    },
+    {
+      name      = "mock-blockchain"
+      image     = "${var.ecr_url}-blockchain:${var.image_tag}"
+      essential = false
+
+      portMappings = [{ containerPort = 8001, protocol = "tcp" }]
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.api.name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "blockchain"
+        }
+      }
+
+      healthCheck = {
+        command     = ["CMD-SHELL", "curl -f http://localhost:8001/health || exit 1"]
+        interval    = 15
+        timeout     = 5
+        retries     = 3
         startPeriod = 10
       }
 
-      # Run as non-root (SOC 2: least privilege)
       user = "1000"
     }
   ])
@@ -341,9 +372,9 @@ resource "aws_ecs_service" "api" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = aws_subnet.public[*].id
+    subnets          = aws_subnet.private[*].id
     security_groups  = [aws_security_group.ecs.id]
-    assign_public_ip = true
+    assign_public_ip = false
   }
 
   load_balancer {

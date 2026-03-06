@@ -71,10 +71,15 @@ jobs:
         run: |
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
-          # create-repository falla si ya existe, describe-repositories si no existe
           aws ecr describe-repositories --repository-names $ECR_REPO 2>/dev/null || \
             aws ecr create-repository \
               --repository-name $ECR_REPO \
+              --image-tag-mutability IMMUTABLE \
+              --image-scanning-configuration scanOnPush=true
+
+          aws ecr describe-repositories --repository-names $ECR_REPO-blockchain 2>/dev/null || \
+            aws ecr create-repository \
+              --repository-name $ECR_REPO-blockchain \
               --image-tag-mutability IMMUTABLE \
               --image-scanning-configuration scanOnPush=true
 
@@ -139,10 +144,19 @@ jobs:
         env:
           ECR_URL: ${{ needs.bootstrap.outputs.ecr_url }}
         run: |
+          # Build payments-api
           docker build -f api/Dockerfile \
             -t $ECR_URL:$IMAGE_TAG .
           docker push $ECR_URL:$IMAGE_TAG
+
+          # Build mock-blockchain (uses separate ECR repo with -blockchain suffix)
+          docker build -f mock-blockchain/Dockerfile \
+            -t $ECR_URL-blockchain:$IMAGE_TAG \
+            mock-blockchain/
+          docker push $ECR_URL-blockchain:$IMAGE_TAG
+
           echo "Pushed $ECR_URL:$IMAGE_TAG"
+          echo "Pushed $ECR_URL-blockchain:$IMAGE_TAG"
 
   # ─── 5. Terraform: full infra deploy ─────────────────────────────────────
   deploy:
