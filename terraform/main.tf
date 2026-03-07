@@ -62,6 +62,18 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# Private route table (no IGW — traffic goes through VPC endpoints only)
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+  tags   = merge(local.common_tags, { Name = "${var.project}-private-rt" })
+}
+
+resource "aws_route_table_association" "private" {
+  count          = 2
+  subnet_id      = aws_subnet.private[count.index].id
+  route_table_id = aws_route_table.private.id
+}
+
 # ─── Security Groups ───────────────────────────────────────────────────────────
 resource "aws_security_group" "alb" {
   name        = "${var.project}-alb-sg"
@@ -170,7 +182,7 @@ resource "aws_vpc_endpoint" "s3" {
   vpc_id            = aws_vpc.main.id
   service_name      = "com.amazonaws.${var.aws_region}.s3"
   vpc_endpoint_type = "Gateway"
-  route_table_ids   = [aws_route_table.public.id]
+  route_table_ids   = [aws_route_table.public.id, aws_route_table.private.id]
   tags              = merge(local.common_tags, { Name = "${var.project}-s3-endpoint" })
 }
 
@@ -340,9 +352,9 @@ resource "aws_ecs_service" "api" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = aws_subnet.private[*].id
+    subnets          = aws_subnet.public[*].id
     security_groups  = [aws_security_group.ecs.id]
-    assign_public_ip = false
+    assign_public_ip = true
   }
 
   load_balancer {
